@@ -27,6 +27,7 @@ import { slicerDisplayName, integrationIdsForProjectSlicer, findVerifiedVersion 
 import { loadExperimentalFeatures } from '../slicerIntegration/featureFlags';
 import { buildDiagnosticReport } from '../slicerIntegration/diagnostics';
 import { errorTemplate } from '../slicerIntegration/errors';
+import { completeSession, isAutomatedCalibrationEnabled } from '../automatedCalibration';
 
 type Stage = 'slicer' | 'profiles' | 'configure' | 'preview' | 'result';
 
@@ -703,6 +704,60 @@ async function persistRecord(
   await saveProject(project);
 }
 
+/** When this project has an automated calibration session still open (the user
+ *  reached here via the Stage 8 "Finish calibration" handoff), offer to return
+ *  to it or close it out now that a tuned profile has been installed/exported.
+ *  Returns null when there's no open session or the flag is off. */
+function automatedSessionCloseout(
+  project: CalibrationProject, rerender: () => void
+): HTMLElement | null {
+  const status = project.sessionStatus;
+  const open = isAutomatedCalibrationEnabled()
+    && status !== undefined
+    && status !== 'completed' && status !== 'cancelled' && status !== 'failed';
+  if (!open) return null;
+  return h('div', { class: 'card' },
+    h('h3', { style: 'margin-top:0' }, 'Automated calibration session'),
+    h('p', {}, 'This project has an automated calibration session in progress. Now that your tuned profile is ready, you can close it out.'),
+    h('div', { class: 'btn-row' },
+      h('a', { class: 'btn', href: `#/automated/${project.id}` }, '← Back to automated session'),
+      h('button', {
+        class: 'btn btn-primary', onClick: async () => {
+          const ok = await confirmDialog({
+            title: 'Mark this automated session complete?',
+            body: 'This closes the automated session. Your recorded results and this profile are kept — you can still create or re-install a profile afterward, and you can always start a new session later.',
+            confirmLabel: 'Mark complete'
+          });
+          if (!ok) return;
+          const res = completeSession(project);
+          if (!res.ok) { toast(res.reason ?? 'Could not complete the session.', 'error'); return; }
+          await saveProject(project);
+          toast('Automated session marked complete.', 'success');
+          rerender();
+        }
+      }, '✓ Mark automated session complete')));
+}
+
+/** The printer presets the generated filament is bound to. Bambu Studio / Orca
+ *  only list a filament under the printer named in `compatible_printers`; when
+ *  none match the printer the user has selected, the slicer still installs it but
+ *  files it under the "Unsupported presets" group — where it reads as "missing"
+ *  even though nothing is wrong. Naming the bound printer(s) here turns that
+ *  silent mismatch into something the user can act on. An empty list means the
+ *  preset is compatible with every printer, so there is nothing to warn about. */
+function compatiblePrintersNote(gen: GeneratedFilamentProfile): HTMLElement | null {
+  const raw = gen.data.compatible_printers;
+  const printers = Array.isArray(raw)
+    ? raw.filter((x): x is string => typeof x === 'string' && x.trim() !== '')
+    : [];
+  if (printers.length === 0) return null;
+  return h('p', { class: 'field-help' },
+    'Compatible with: ', h('strong', {}, printers.join(', ')), '. ',
+    'Select that exact printer preset in your slicer. If the filament is missing from the ',
+    h('strong', {}, 'Custom'), ' list, look under ', h('strong', {}, '“Unsupported presets”'),
+    ' — that means a different printer is currently selected.');
+}
+
 function renderResultStage(
   root: HTMLElement, st: WizState, project: CalibrationProject, rerender: () => void
 ): void {
@@ -718,6 +773,7 @@ function renderResultStage(
       h('h2', { style: 'margin-top:0' }, '✅ Profile Installed Successfully'),
       h('p', {}, h('strong', {}, gen.name), ` — installed into ${st.installation!.displayName}.`),
       h('p', { class: 'field-help' }, `Based on: ${gen.baseProfileName}`),
+      compatiblePrintersNote(gen),
       h('h3', {}, 'Applied'),
       h('ul', { style: 'margin:.2rem 0;padding-left:1.2rem' }, applied.map(a => h('li', {}, a))),
       h('p', {}, `A backup was created before installation${res.backupId ? ` (id ${res.backupId})` : ''}. The installed file was re-read and verified.`),
@@ -729,11 +785,15 @@ function renderResultStage(
         res.backupId ? h('button', { class: 'btn', onClick: () => bridge.openBackupDirectory(res.backupId!).catch(e => toast(String(e), 'error')) }, '🗄 View backup') : null,
         h('a', { class: 'btn', href: `#/report/${project.id}` }, '📄 View calibration report'))
     ));
+    const co = automatedSessionCloseout(project, rerender);
+    if (co) root.append(co);
     return;
   }
 
   const card = h('div', { class: 'card' }, h('h2', { style: 'margin-top:0' }, 'Install or export'));
   root.append(card);
+  const compatNote = compatiblePrintersNote(gen);
+  if (compatNote) card.append(compatNote);
 
   if (res && res.error) {
     const t = errorTemplate(res.error.code);
@@ -797,6 +857,12 @@ function renderResultStage(
 
   card.append(h('div', { class: 'btn-row', style: 'margin-top:.6rem' },
     h('button', { class: 'btn btn-ghost', onClick: () => { st.stage = 'preview'; rerender(); } }, '← Back to preview')));
+
+  // After a successful export, offer to close out an open automated session too.
+  if (st.exportedTo) {
+    const co = automatedSessionCloseout(project, rerender);
+    if (co) root.append(co);
+  }
 
   async function doInstall(allowReplace: boolean): Promise<void> {
     if (!st.installation || !st.location || !gen) return;
