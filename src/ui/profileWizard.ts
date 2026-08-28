@@ -738,6 +738,26 @@ function automatedSessionCloseout(
       }, '✓ Mark automated session complete')));
 }
 
+/** The printer presets the generated filament is bound to. Bambu Studio / Orca
+ *  only list a filament under the printer named in `compatible_printers`; when
+ *  none match the printer the user has selected, the slicer still installs it but
+ *  files it under the "Unsupported presets" group — where it reads as "missing"
+ *  even though nothing is wrong. Naming the bound printer(s) here turns that
+ *  silent mismatch into something the user can act on. An empty list means the
+ *  preset is compatible with every printer, so there is nothing to warn about. */
+function compatiblePrintersNote(gen: GeneratedFilamentProfile): HTMLElement | null {
+  const raw = gen.data.compatible_printers;
+  const printers = Array.isArray(raw)
+    ? raw.filter((x): x is string => typeof x === 'string' && x.trim() !== '')
+    : [];
+  if (printers.length === 0) return null;
+  return h('p', { class: 'field-help' },
+    'Compatible with: ', h('strong', {}, printers.join(', ')), '. ',
+    'Select that exact printer preset in your slicer. If the filament is missing from the ',
+    h('strong', {}, 'Custom'), ' list, look under ', h('strong', {}, '“Unsupported presets”'),
+    ' — that means a different printer is currently selected.');
+}
+
 function renderResultStage(
   root: HTMLElement, st: WizState, project: CalibrationProject, rerender: () => void
 ): void {
@@ -753,6 +773,7 @@ function renderResultStage(
       h('h2', { style: 'margin-top:0' }, '✅ Profile Installed Successfully'),
       h('p', {}, h('strong', {}, gen.name), ` — installed into ${st.installation!.displayName}.`),
       h('p', { class: 'field-help' }, `Based on: ${gen.baseProfileName}`),
+      compatiblePrintersNote(gen),
       h('h3', {}, 'Applied'),
       h('ul', { style: 'margin:.2rem 0;padding-left:1.2rem' }, applied.map(a => h('li', {}, a))),
       h('p', {}, `A backup was created before installation${res.backupId ? ` (id ${res.backupId})` : ''}. The installed file was re-read and verified.`),
@@ -771,6 +792,8 @@ function renderResultStage(
 
   const card = h('div', { class: 'card' }, h('h2', { style: 'margin-top:0' }, 'Install or export'));
   root.append(card);
+  const compatNote = compatiblePrintersNote(gen);
+  if (compatNote) card.append(compatNote);
 
   if (res && res.error) {
     const t = errorTemplate(res.error.code);
