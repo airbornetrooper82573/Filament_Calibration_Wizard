@@ -1,0 +1,58 @@
+name: Sync Fork with Upstream
+
+on:
+  schedule:
+    - cron: "17 8 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out fork
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/tayloraaron078-tech/Filament_Calibration_Wizard.git
+          git fetch upstream main
+
+      - name: Fast-forward from upstream
+        id: sync
+        shell: bash
+        run: |
+          BEFORE="$(git rev-parse HEAD)"
+
+          if ! git merge --ff-only upstream/main; then
+            echo "::error::Fork main has diverged from upstream/main. Automatic sync stopped to avoid overwriting your changes."
+            exit 1
+          fi
+
+          AFTER="$(git rev-parse HEAD)"
+
+          if [ "$BEFORE" = "$AFTER" ]; then
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+            echo "Fork is already up to date."
+          else
+            echo "updated=true" >> "$GITHUB_OUTPUT"
+            git push origin main
+          fi
+
+      - name: Rebuild GHCR image
+        if: steps.sync.outputs.updated == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run docker-publish.yml --ref main
